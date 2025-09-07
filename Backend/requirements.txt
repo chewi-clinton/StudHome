@@ -1,0 +1,12 @@
+uv>=0.8.10
+django 
+djangorestframework
+environs
+django-phonenumber-field==8.1.0
+psycopg2-binary==2.9.10
+django-cloudinary-storage==0.3.0
+pillow==11.3.0
+cloudinary==1.44.1
+python-decouple==3.8
+djangorestframework-simplejwt==5.5.1
+pyjwt==2.10.1

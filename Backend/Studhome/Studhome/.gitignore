@@ -1,0 +1,21 @@
+# Environment variables
+.env
+
+# Virtual environment
+.venv/
+__pycache__/
+
+# Django specific
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+db.sqlite3
+*.log
+media/
+staticfiles/
+
+# macOS system files
+.DS_Store
