@@ -97,13 +97,14 @@ WSGI_APPLICATION = 'Studhome.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'studhome_db',
-        'USER': 'yxngac',
-        'PASSWORD': 'clinton',  
-        'HOST': 'localhost',
-        'PORT': '5432',
-    }  
+        'NAME': os.getenv("DB_NAME"),
+        'USER': os.getenv("DB_USER"),
+        'PASSWORD': os.getenv("DB_PASSWORD"),
+        'HOST': os.getenv("DB_HOST"),
+        'PORT': os.getenv("DB_PORT"),
+    }
 }
+
 
 CLOUDINARY_STORAGE = {
     'CLOUD_NAME': os.getenv('CLOUDINARY_CLOUD_NAME'),
@@ -160,3 +161,8 @@ SIMPLE_JWT = {
 
 CAMPAY_USERNAME = config('CAMPAY_USERNAME')
 CAMPAY_PASSWORD = config('CAMPAY_PASSWORD')
+
+
+
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")

@@ -7,10 +7,12 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django.core.mail import send_mail
 import cloudinary.uploader
 from campay.sdk import Client as CamPayClient
 from .models import House, Transaction, Reservation, User, SavedHome
 from .serializers import HouseSerializer, TransactionSerializer, ReservationSerializer, UserSerializer, SavedHomeSerializer
+from rest_framework_simplejwt.tokens import RefreshToken  # Added for token generation
 import logging
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,23 @@ campay = CamPayClient({
     "app_password": settings.CAMPAY_PASSWORD,
     "environment": "DEV"
 })
+
+class UserRegisterAPIView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = UserSerializer(data=request.data)
+        if serializer.is_valid():
+            user = serializer.save()
+            refresh = RefreshToken.for_user(user)  # Generate tokens
+            response_data = {
+                'refresh': str(refresh),
+                'access': str(refresh.access_token),
+            }
+            logger.info(f"User registration response: {response_data}")  # Debug log
+            return Response(response_data, status=status.HTTP_201_CREATED)
+        logger.error(f"Registration errors: {serializer.errors}")
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 class UserProfileAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -72,19 +91,12 @@ class BookTourAPIView(APIView):
         serializer = TransactionSerializer(transaction)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
-class UserRegisterAPIView(APIView):
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        serializer = UserSerializer(data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
 class HouseListAPIView(APIView):
     def get(self, request):
+        room_type = request.query_params.get('room_type')
         houses = House.objects.filter(remove=False)
+        if room_type and room_type in ['single', 'double', 'apartment']:
+            houses = houses.filter(room_type=room_type)
         serializer = HouseSerializer(houses, many=True, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -275,11 +287,7 @@ class InitiatePaymentAPIView(APIView):
                 payment_status='PENDING'
             ).first()
             if existing_transaction:
-                return Response({
-                    'reference': existing_transaction.payment_reference,
-                    'transaction_id': str(existing_transaction.transaction_id),
-                    'message': 'Payment already initiated. Please complete payment via mobile money.',
-                }, status=status.HTTP_200_OK)
+                existing_transaction.delete()
             try:
                 payment_response = campay.initCollect({
                     "amount": str(amount),
@@ -304,7 +312,7 @@ class InitiatePaymentAPIView(APIView):
             return Response({
                 'reference': reference,
                 'transaction_id': str(transaction.transaction_id),
-                'message': 'Payment initiated. Please complete payment via mobile money.',
+                'message': 'Payment initiated. Please complete payment via mobile money.'
             }, status=status.HTTP_201_CREATED)
         except House.DoesNotExist:
             return Response({'error': 'House not found'}, status=status.HTTP_404_NOT_FOUND)
@@ -331,28 +339,54 @@ class VerifyPaymentAPIView(APIView):
                 return Response({'error': 'Failed to verify payment: No status returned'}, status=status.HTTP_400_BAD_REQUEST)
             transaction.payment_status = transaction_status
             transaction.save()
-            if transaction_status == 'SUCCESSFUL' and transaction.transaction_type == 'reserve':
-                active_reservation = Reservation.objects.filter(
-                    house=transaction.house,
-                    is_active=True,
-                    expiry_date__gt=timezone.now()
-                ).first()
-                if active_reservation and active_reservation.user != request.user:
-                    return Response({"error": "House is reserved by another user"}, status=status.HTTP_400_BAD_REQUEST)
-                Reservation.objects.create(
-                    user=transaction.user,
-                    house=transaction.house,
-                    is_active=True,
-                    expiry_date=timezone.now() + timedelta(days=7)
-                )
-                transaction.house.is_reserved = True
-                transaction.house.save()
+            if transaction_status == 'SUCCESSFUL':
+                if transaction.transaction_type == 'reserve':
+                    active_reservation = Reservation.objects.filter(
+                        house=transaction.house,
+                        is_active=True,
+                        expiry_date__gt=timezone.now()
+                    ).first()
+                    if active_reservation and active_reservation.user != request.user:
+                        return Response({"error": "House is reserved by another user"}, status=status.HTTP_400_BAD_REQUEST)
+                    reservation = Reservation.objects.create(
+                        user=transaction.user,
+                        house=transaction.house,
+                        is_active=True,
+                        expiry_date=timezone.now() + timedelta(days=7)
+                    )
+                    transaction.house.is_reserved = True
+                    transaction.house.save()
+                    send_mail(
+                        subject="Payment Approved for Your Reservation",
+                        message=(
+                            f"Dear {transaction.user.username},\n\n"
+                            f"Your payment of {transaction.amount_paid} XAF for reservation {reservation.reservation_id} "
+                            f"(House: {transaction.house.house_name}) has been approved.\n\n"
+                            f"Thank you for booking with StudHome!\n\nBest regards,\nStudHome Team"
+                        ),
+                        from_email=settings.DEFAULT_FROM_EMAIL,
+                        recipient_list=[transaction.user.email],
+                        fail_silently=False,
+                    )
+                elif transaction.transaction_type == 'tour':
+                    send_mail(
+                        subject="Payment Approved for Your Tour",
+                        message=(
+                            f"Dear {transaction.user.username},\n\n"
+                            f"Your payment of {transaction.amount_paid} XAF for booking a tour "
+                            f"of house '{transaction.house.house_name}' has been approved.\n\n"
+                            f"Thank you for using StudHome!\n\nBest regards,\nStudHome Team"
+                        ),
+                        from_email=settings.DEFAULT_FROM_EMAIL,
+                        recipient_list=[transaction.user.email],
+                        fail_silently=False,
+                    )
             return Response({
                 'status': transaction_status,
                 'transaction_id': str(transaction.transaction_id),
             }, status=status.HTTP_200_OK)
-        except Exception:
-            return Response({'error': 'Unexpected error during verification'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception as e:
+            return Response({'error': f'Unexpected error during verification: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class PaymentWebhookAPIView(APIView):
     permission_classes = []
@@ -367,17 +401,41 @@ class PaymentWebhookAPIView(APIView):
             transaction = Transaction.objects.get(payment_reference=reference)
             transaction.payment_status = status_update
             transaction.save()
-            if status_update == 'SUCCESSFUL' and transaction.transaction_type == 'reserve':
-                Reservation.objects.create(
-                    user=transaction.user,
-                    house=transaction.house,
-                    is_active=True,
-                    expiry_date=timezone.now() + timedelta(days=7)
-                )
-                transaction.house.is_reserved = True
-                transaction.house.save()
-            if status_update == 'SUCCESSFUL' and transaction.transaction_type == 'tour':
-                pass
+            if status_update == 'SUCCESSFUL':
+                if transaction.transaction_type == 'reserve':
+                    reservation = Reservation.objects.create(
+                        user=transaction.user,
+                        house=transaction.house,
+                        is_active=True,
+                        expiry_date=timezone.now() + timedelta(days=7)
+                    )
+                    transaction.house.is_reserved = True
+                    transaction.house.save()
+                    send_mail(
+                        subject="Payment Approved for Your Reservation",
+                        message=(
+                            f"Dear {transaction.user.username},\n\n"
+                            f"Your payment of {transaction.amount_paid} XAF for reservation {reservation.reservation_id} "
+                            f"(House: {transaction.house.house_name}) has been approved.\n\n"
+                            f"Thank you for booking with StudHome!\n\nBest regards,\nStudHome Team"
+                        ),
+                        from_email=settings.DEFAULT_FROM_EMAIL,
+                        recipient_list=[transaction.user.email],
+                        fail_silently=False,
+                    )
+                elif transaction.transaction_type == 'tour':
+                    send_mail(
+                        subject="Payment Approved for Your Tour",
+                        message=(
+                            f"Dear {transaction.user.username},\n\n"
+                            f"Your payment of {transaction.amount_paid} XAF for booking a tour "
+                            f"of house '{transaction.house.house_name}' has been approved.\n\n"
+                            f"Thank you for using StudHome!\n\nBest regards,\nStudHome Team"
+                        ),
+                        from_email=settings.DEFAULT_FROM_EMAIL,
+                        recipient_list=[transaction.user.email],
+                        fail_silently=False,
+                    )
             return Response({"message": "Webhook received"}, status=status.HTTP_200_OK)
         except Transaction.DoesNotExist:
             return Response({"error": "Transaction not found"}, status=status.HTTP_404_NOT_FOUND)
